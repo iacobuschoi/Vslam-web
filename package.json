@@ -1,0 +1,13 @@
+{
+  "name": "vslam-web",
+  "version": "1.0.0",
+  "description": "Browser-based monocular visual SLAM: live camera to real-time 3D point map",
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.mjs",
+    "test:e2e": "node test/e2e-demo.mjs"
+  },
+  "license": "MIT",
+  "private": true
+}

@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#0b0f14">
+  <title>VSLAM Web · 실시간 3D 매핑</title>
+  <link rel="stylesheet" href="./css/style.css">
+  <script type="importmap">
+    { "imports": { "three": "./lib/three.module.min.js" } }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <canvas id="view3d"></canvas>
+
+    <header id="topbar">
+      <div class="brand">VSLAM<span>Web</span></div>
+      <div id="statusPill" class="pill init">초기화 중</div>
+      <div id="stats"></div>
+    </header>
+    <div id="hint"></div>
+
+    <div id="videoWrap" title="탭하면 크기가 바뀝니다">
+      <video id="video" playsinline muted autoplay></video>
+      <canvas id="overlay"></canvas>
+    </div>
+
+    <footer id="toolbar">
+      <button id="btnReset" title="맵 초기화 (R)">⟲ 리셋</button>
+      <button id="btnFit" title="맵 전체 보기 (F)">⤢ 전체</button>
+      <button id="btnFollow" title="카메라 따라가기">◎ 따라가기</button>
+      <button id="btnExport" title="PLY 저장 (E)">⤓ PLY</button>
+      <button id="btnFlip" title="전/후면 카메라 전환">⇄ 카메라</button>
+      <button id="btnSettings" title="설정">⚙ 설정</button>
+    </footer>
+
+    <aside id="settings" class="panel hidden">
+      <div class="panel-head"><strong>설정</strong><button id="btnCloseSettings">✕</button></div>
+      <label>대각 시야각 <b id="fovValue">75°</b>
+        <input id="fovRange" type="range" min="50" max="110" step="1" value="75">
+        <small>스마트폰 후면 카메라는 보통 70~80°, 웹캠은 60~75°입니다. 변경하면 맵이 초기화됩니다.</small>
+      </label>
+      <label>처리 해상도
+        <select id="resSelect">
+          <option value="320">320 (빠름)</option>
+          <option value="480" selected>480 (권장)</option>
+          <option value="640">640 (정밀)</option>
+        </select>
+      </label>
+      <label>포인트 크기 <b id="sizeValue">0.030</b>
+        <input id="sizeRange" type="range" min="0.005" max="0.1" step="0.005" value="0.03">
+      </label>
+      <label class="row"><input id="fbCheck" type="checkbox" checked> 양방향 추적 검증 (정확도↑, 속도↓)</label>
+      <label class="row"><input id="relocCheck" type="checkbox" checked> 추적 실패 시 자동 복구</label>
+      <label class="row"><input id="kfCheck" type="checkbox" checked> 키프레임 표시</label>
+      <label class="row"><input id="trajCheck" type="checkbox" checked> 궤적 표시</label>
+      <div class="panel-actions">
+        <button id="btnCamera">📷 카메라 모드</button>
+        <button id="btnDemo">🧪 데모 모드</button>
+      </div>
+      <p class="help">
+        <b>사용법</b> 카메라를 켠 뒤 <em>옆으로</em> 천천히 움직이면 초기화됩니다. 회전만 하면 깊이를 알 수 없어 초기화되지 않습니다.
+        초기화 후에는 천천히 방을 둘러보세요. 3D 화면은 드래그로 회전, 휠/핀치로 확대, 우클릭/두 손가락으로 이동합니다.
+      </p>
+    </aside>
+
+    <div id="startOverlay" class="overlay">
+      <div class="card">
+        <h1>VSLAM Web</h1>
+        <p>카메라로 방을 비추면 실시간으로 3D 포인트 맵을 만듭니다.</p>
+        <p id="startMsg" class="msg"></p>
+        <div class="actions">
+          <button id="btnStart" class="primary">📷 카메라 시작</button>
+          <button id="btnStartDemo">🧪 데모 모드</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast"></div>
+  </div>
+  <script type="module" src="./js/main.js"></script>
+</body>
+</html>

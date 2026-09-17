@@ -1,0 +1,6 @@
+node_modules/
+key.pem
+cert.pem
+*.log
+.DS_Store
+test/output/
