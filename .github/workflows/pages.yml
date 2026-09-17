@@ -1,0 +1,37 @@
+# Deploys the static site to GitHub Pages so the app is reachable over HTTPS
+# (cameras only work on HTTPS). Runs on every push to the branch and on demand.
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [claude/vslam-web-3d-mapping-9f3bj5, main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: .
+      - name: Deploy
+        id: deployment
+        uses: actions/deploy-pages@v4
