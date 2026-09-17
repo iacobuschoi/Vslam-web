@@ -51,3 +51,34 @@ test('SLAM initializes and tracks through a synthetic room', () => {
   console.log(`map points within 15cm of a wall: ${onSurface}/${snap.count}`);
   assert.ok(onSurface / snap.count > 0.8, `too many off-surface points: ${onSurface}/${snap.count}`);
 });
+
+test('keyframes produce textured meshes lying on the room surfaces', () => {
+  const w = 480, h = 360;
+  const slam = new Slam(w, h, { fovDeg: 75 });
+  const planes = makeRoom();
+  const meshes = [];
+  const est = [], gt = [];
+  for (let k = 0; k < 120; k++) {
+    const P = cameraPose(k);
+    const res = slam.processFrame(renderRoom(planes, P, slam.cam, w, h));
+    if (res.mesh) meshes.push(res.mesh);
+    if (res.pose) { const pose = L.poseCreate(res.pose.subarray(0, 9), res.pose.subarray(9, 12)); est.push(...L.poseCenter(pose)); gt.push(...L.poseCenter(P)); }
+  }
+  assert.ok(meshes.length >= 5, `meshes ${meshes.length}`);
+  const a = alignSimilarity(Float64Array.from(est), Float64Array.from(gt), est.length / 3);
+  let tri = 0, verts = 0, onSurface = 0;
+  for (const m of meshes) {
+    tri += m.triangleCount; verts += m.vertexCount;
+    assert.equal(m.positions.length, 3 * m.vertexCount);
+    assert.equal(m.uvs.length, 2 * m.vertexCount);
+    for (let i = 0; i < m.vertexCount; i++) {
+      const X = L.add3(L.scale3(L.mat3MulVec(a.R, m.positions.subarray(3 * i, 3 * i + 3)), a.s), a.t);
+      let dmin = Infinity;
+      for (const p of planes) dmin = Math.min(dmin, Math.abs(p.n[0] * X[0] + p.n[1] * X[1] + p.n[2] * X[2] - p.d));
+      if (dmin < 0.15) onSurface++;
+    }
+  }
+  console.log(`meshes ${meshes.length}, triangles ${tri}, vertices ${verts}, on-surface ${onSurface}/${verts}`);
+  assert.ok(tri > 2000, `too few triangles: ${tri}`);
+  assert.ok(onSurface / verts > 0.85, `mesh vertices off surface: ${onSurface}/${verts}`);
+});

@@ -24,6 +24,10 @@ const app = {
     relocalize: true,
     showKeyframes: true,
     showTrajectory: true,
+    viewMode: 'mesh',      // 'mesh' | 'points' | 'both'
+    meshing: true,
+    texScale: 1,           // 1 = processing resolution, 2 = double (camera mode only)
+    maxMeshes: 120,
   },
   viewer: null,
   demo: null,
@@ -38,6 +42,8 @@ const app = {
   resultCounter: 0,
 };
 window.__vslam = app;
+app.exportGlb = () => app.viewer.exportGLB();
+app.setViewMode = (m) => setViewMode(m);
 
 const els = {
   view3d: $('view3d'), video: $('video'), overlay: $('overlay'), videoWrap: $('videoWrap'),
@@ -50,6 +56,7 @@ const els = {
   fovRange: $('fovRange'), fovValue: $('fovValue'), resSelect: $('resSelect'),
   sizeRange: $('sizeRange'), sizeValue: $('sizeValue'), fbCheck: $('fbCheck'), relocCheck: $('relocCheck'),
   kfCheck: $('kfCheck'), trajCheck: $('trajCheck'),
+  btnView: $('btnView'), btnGlb: $('btnGlb'), meshCheck: $('meshCheck'), texSelect: $('texSelect'), maxMeshSelect: $('maxMeshSelect'),
 };
 
 // ---------- Settings persistence ----------
@@ -60,6 +67,7 @@ function loadSettings() {
   } catch (_) { /* ignore */ }
   if (params.get('fov')) app.settings.fov = +params.get('fov');
   if (params.get('res')) app.settings.procMax = +params.get('res');
+  if (['mesh', 'points', 'both'].includes(params.get('view'))) app.settings.viewMode = params.get('view');
 }
 function saveSettings() {
   try { localStorage.setItem('vslam-settings', JSON.stringify(app.settings)); } catch (_) { /* ignore */ }
@@ -105,6 +113,7 @@ function updateStats(res) {
     `<span>연산 <b>${s.procMs.toFixed(0)}</b> ms</span>`,
     `<span>포인트 <b>${s.mapPoints}</b></span>`,
     `<span>키프레임 <b>${s.keyframes}</b></span>`,
+    `<span>삼각형 <b>${app.viewer.meshTriangles}</b></span>`,
     `<span>추적점 <b>${s.inliers}</b>/${s.tracks}</span>`,
   ].join('');
 }
@@ -169,6 +178,7 @@ function workerOptions() {
     fovDeg: app.settings.fov,
     fbCheck: app.settings.fbCheck,
     relocalize: app.settings.relocalize,
+    meshing: app.settings.meshing,
   };
 }
 
@@ -185,6 +195,18 @@ function onResult(res) {
   setStatus(res.state, res.hint);
   drawOverlay(res.features);
   app.viewer.setCameraPose(res.pose);
+  if (res.mesh) {
+    let tex;
+    if (app.mode === 'camera' && app.settings.texScale > 1 && app.texCanvas) {
+      const c = document.createElement('canvas');
+      c.width = app.texCanvas.width; c.height = app.texCanvas.height;
+      c.getContext('2d').drawImage(app.texCanvas, 0, 0);
+      tex = c;
+    } else {
+      tex = { rgba: res.mesh.rgba, width: res.mesh.width, height: res.mesh.height };
+    }
+    app.viewer.addKeyframeMesh(res.mesh, tex);
+  }
   if (res.map) {
     app.map = res.map;
     app.viewer.setMap(res.map.positions, res.map.colors, res.map.count);
@@ -295,6 +317,13 @@ function grabFrame() {
       if (pw !== app.procW || ph !== app.procH) { setupProcessing(pw, ph); return null; }
     }
     app.procCtx.drawImage(els.video, 0, 0, app.procW, app.procH);
+    if (app.settings.texScale > 1 && app.settings.meshing) {
+      // Higher-resolution copy of the same frame, used as the mesh texture if this frame becomes a keyframe.
+      const tw = app.procW * app.settings.texScale, th = app.procH * app.settings.texScale;
+      if (!app.texCanvas) app.texCanvas = document.createElement('canvas');
+      if (app.texCanvas.width !== tw || app.texCanvas.height !== th) { app.texCanvas.width = tw; app.texCanvas.height = th; app.texCtx = app.texCanvas.getContext('2d'); }
+      app.texCtx.drawImage(els.video, 0, 0, tw, th);
+    }
     return app.procCtx.getImageData(0, 0, app.procW, app.procH);
   }
   if (app.mode === 'demo') return app.demo.grab(performance.now());
@@ -340,6 +369,32 @@ function downloadText(text, name) {
   setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 1000);
 }
 
+async function exportGlb() {
+  if (app.viewer.meshes.length === 0) { toast('저장할 메시가 아직 없습니다'); return; }
+  try {
+    toast('GLB 파일을 만드는 중...');
+    const buf = await app.viewer.exportGLB();
+    const blob = new Blob([buf], { type: 'model/gltf-binary' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `vslam-map-${timestamp()}.glb`;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { a.remove(); URL.revokeObjectURL(url); }, 1000);
+    toast(`GLB 저장 완료 (${(blob.size / 1048576).toFixed(1)} MB, 메시 ${app.viewer.meshes.length}개)`);
+  } catch (err) {
+    console.error(err);
+    toast('GLB 저장 실패: ' + (err.message || err));
+  }
+}
+
+function setViewMode(mode) {
+  app.settings.viewMode = mode;
+  app.viewer.setViewMode(mode);
+  const label = { mesh: '🖼 사진', points: '· 점', both: '🖼 사진+점' }[mode] || mode;
+  els.btnView.textContent = label;
+  saveSettings();
+}
+
 function exportPly() {
   const m = app.map;
   if (!m || m.count === 0) { toast('저장할 포인트가 아직 없습니다'); return; }
@@ -373,6 +428,11 @@ function applySettingsToUI() {
   els.kfCheck.checked = s.showKeyframes;
   els.trajCheck.checked = s.showTrajectory;
   els.btnFollow.classList.toggle('active', s.follow);
+  els.meshCheck.checked = s.meshing;
+  els.texSelect.value = String(s.texScale);
+  els.maxMeshSelect.value = String(s.maxMeshes);
+  app.viewer.setMaxMeshes(s.maxMeshes);
+  setViewMode(s.viewMode);
   app.viewer.setPointSize(s.pointSize);
   app.viewer.setFollow(s.follow);
   app.viewer.kfLines.visible = s.showKeyframes;
@@ -400,6 +460,17 @@ function bindUI() {
     saveSettings();
   });
   els.btnSettings.addEventListener('click', () => els.settings.classList.toggle('hidden'));
+  els.btnView.addEventListener('click', () => {
+    const order = ['mesh', 'points', 'both'];
+    setViewMode(order[(order.indexOf(app.settings.viewMode) + 1) % order.length]);
+  });
+  els.btnGlb.addEventListener('click', exportGlb);
+  els.meshCheck.addEventListener('change', () => {
+    app.settings.meshing = els.meshCheck.checked; saveSettings();
+    app.worker.postMessage({ type: 'options', options: { meshing: app.settings.meshing } });
+  });
+  els.texSelect.addEventListener('change', () => { app.settings.texScale = +els.texSelect.value; saveSettings(); });
+  els.maxMeshSelect.addEventListener('change', () => { app.settings.maxMeshes = +els.maxMeshSelect.value; app.viewer.setMaxMeshes(app.settings.maxMeshes); saveSettings(); });
   els.btnCloseSettings.addEventListener('click', () => els.settings.classList.add('hidden'));
   els.videoWrap.addEventListener('click', () => els.videoWrap.classList.toggle('large'));
 
@@ -443,6 +514,8 @@ function bindUI() {
     if (e.key === 'r') resetMap();
     else if (e.key === 'f') app.viewer.fitView();
     else if (e.key === 'e') exportPly();
+    else if (e.key === 'g') exportGlb();
+    else if (e.key === 'v') els.btnView.click();
   });
   document.addEventListener('visibilitychange', () => { if (document.hidden) app.busy = false; });
 }

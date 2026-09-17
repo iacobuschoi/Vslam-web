@@ -8,6 +8,7 @@ import { KLTTracker } from './klt.js';
 import * as G from './geometry.js';
 import * as L from './linalg.js';
 import * as B from './brief.js';
+import { buildKeyframeMesh } from './mesh.js';
 
 export const State = Object.freeze({ INIT: 'INIT', TRACKING: 'TRACKING', LOST: 'LOST' });
 
@@ -33,6 +34,10 @@ export class Slam {
       relocalize: true,
       maxRelocTrain: 3000,
       kltPredict: false,      // seed KLT with motion-model predictions (can lock onto repetitive texture)
+      meshing: true,          // semi-dense matching between keyframes + textured keyframe meshes
+      maxDensePoints: 1500,
+      denseFastThreshold: 10,
+      maxDenseTotal: 250000,
     }, opts);
     this.scale = Math.max(width, height) / 480;
     this.setFov(this.opts.fovDeg);
@@ -43,6 +48,10 @@ export class Slam {
     this.pyrCur = new Pyramid(width, height, this.opts.pyramidLevels);
     this.pyrPrev = new Pyramid(width, height, this.opts.pyramidLevels);
     this.klt = new KLTTracker({ winRadius: this.opts.kltWinRadius, fbCheck: this.opts.fbCheck });
+    this.denseKlt = new KLTTracker({ winRadius: 5, fbCheck: true, fbThreshold: 1.0, maxIter: 20 });
+    this.kfPyr = new Pyramid(width, height, this.opts.pyramidLevels);
+    this.kfPyrValid = false;
+    this.denseCell = Math.max(5, Math.sqrt((width * height) / Math.max(this.opts.maxDensePoints, 1)) * 0.9);
     this.rng = L.makeRng(1234);
     this.reset();
   }
@@ -80,6 +89,12 @@ export class Slam {
     this.lastInliers = 0;
     this.lastParallax = 0;
     this.trajectory = [];
+    this.densePoints = [];   // display-only points from semi-dense matching: {X, r, g, b}
+    this.denseCount = 0;
+    this.kfPyrValid = false;
+    this.pendingMesh = null;
+    this.lastMeshKF = null;
+    this.meshStats = { vertices: 0, triangles: 0 };
   }
 
   // ---------- Public entry point ----------
@@ -127,6 +142,11 @@ export class Slam {
     this.trajectory = [];
     this.lastPoseOk = false;
     this.initKF = { id: this.nextKfId++, index: this.frameIndex, pose: L.poseCreate(), nTracked: 0 };
+    this.densePoints = [];
+    this.denseCount = 0;
+    this.pendingMesh = null;
+    this.snapshotKeyframePyramid();
+    this.lastMeshKF = this.initKF;
     this.detectNewFeatures(this.initKF);
     this.state = State.INIT;
     this.hint = 'move';
@@ -206,6 +226,7 @@ export class Slam {
     this.lastPoseOk = true;
     this.medianDepth = this.opts.targetDepth;
     this.computeDescriptorsForTracks();
+    this.meshKeyframe(KF1, KF0);
     this.detectNewFeatures(KF1);
     KF1.nTracked = keep.length;
     this.refKF = KF1;
@@ -358,6 +379,7 @@ export class Slam {
     this.state = State.LOST;
     this.lastPoseOk = false;
     this.lostFrames = 0;
+    this.kfPyrValid = false;
     this.tracks = [];
     this.hint = 'lost';
     return false;
@@ -418,6 +440,7 @@ export class Slam {
     }
     this.tracks = this.tracks.filter((t) => !t.dead);
     this.computeDescriptorsForTracks();
+    this.meshKeyframe(KF, this.lastMeshKF);
     this.detectNewFeatures(KF);
     let nTracked = 0;
     for (const tr of this.tracks) if (tr.mp) nTracked++;
@@ -495,6 +518,116 @@ export class Slam {
       const d = B.computeDescriptor(blur, this.w, this.h, tr.x, tr.y, a);
       if (d) tr.mp.desc = Uint32Array.from(d);
     }
+  }
+
+  // ---------- Semi-dense mapping + textured meshes ----------
+
+  snapshotKeyframePyramid() {
+    const src = this.pyrCur, dst = this.kfPyr;
+    for (let l = 0; l < src.levels; l++) { dst.img[l].set(src.img[l]); dst.gx[l].set(src.gx[l]); dst.gy[l].set(src.gy[l]); }
+    this.kfPyrValid = true;
+  }
+
+  /**
+   * Match many corners from the previous keyframe (whose pyramid is in kfPyr) into the current frame (the new
+   * keyframe) and triangulate them. Returns { pts2 (in KF, Float64Array), pts3, n } or null.
+   */
+  densify(KF, prevKF) {
+    if (!this.kfPyrValid || !prevKF || prevKF === KF) return null;
+    const w = this.w, h = this.h, { f, cx, cy } = this.cam;
+    const corners = detectFast(this.kfPyr.img[0], w, h, this.opts.denseFastThreshold, 8, this.scoreMap);
+    const sel = selectGridCorners(corners, w, h, this.denseCell, null, this.opts.maxDensePoints);
+    const n = sel.length;
+    if (n < 20) return null;
+    const pts = new Float32Array(2 * n);
+    for (let i = 0; i < n; i++) { pts[2 * i] = sel[i][0]; pts[2 * i + 1] = sel[i][1]; }
+    // Initial guess: median displacement of the tracked map points between the two keyframes.
+    let guess = null;
+    const dxs = [], dys = [];
+    for (const tr of this.tracks) {
+      const o = tr.obs;
+      if (o.length >= 2 && o[o.length - 1].kf === KF && o[o.length - 2].kf === prevKF) {
+        dxs.push(o[o.length - 1].x - o[o.length - 2].x); dys.push(o[o.length - 1].y - o[o.length - 2].y);
+      }
+    }
+    if (dxs.length >= 5) {
+      const mdx = L.median(dxs), mdy = L.median(dys);
+      guess = new Float32Array(2 * n);
+      for (let i = 0; i < n; i++) { guess[2 * i] = pts[2 * i] + mdx; guess[2 * i + 1] = pts[2 * i + 1] + mdy; }
+    }
+    const r = this.denseKlt.track(this.kfPyr, this.pyrCur, pts, n, guess);
+    const pts2 = new Float64Array(2 * n), pts3 = new Float64Array(3 * n);
+    const reproj = 2.5 * this.scale, minPar = 1.0 * DEG;
+    let m = 0;
+    const p = new Float64Array(3);
+    for (let i = 0; i < n; i++) {
+      if (!r.status[i]) continue;
+      const x1 = pts[2 * i], y1 = pts[2 * i + 1], x2 = r.next[2 * i], y2 = r.next[2 * i + 1];
+      const xn1 = (x1 - cx) / f, yn1 = (y1 - cy) / f, xn2 = (x2 - cx) / f, yn2 = (y2 - cy) / f;
+      const r1 = L.mat3TMulVec(prevKF.pose.R, [xn1, yn1, 1]), r2 = L.mat3TMulVec(KF.pose.R, [xn2, yn2, 1]);
+      const cosang = L.dot3(r1, r2) / (L.norm3(r1) * L.norm3(r2));
+      if (Math.acos(Math.max(-1, Math.min(1, cosang))) < minPar) continue;
+      const X = G.triangulate2(prevKF.pose, KF.pose, xn1, yn1, xn2, yn2);
+      if (!X) continue;
+      L.poseApply(prevKF.pose, X, p);
+      if (p[2] <= 1e-6) continue;
+      let du = f * p[0] / p[2] + cx - x1, dv = f * p[1] / p[2] + cy - y1;
+      if (du * du + dv * dv > reproj * reproj) continue;
+      L.poseApply(KF.pose, X, p);
+      if (p[2] <= 1e-6 || p[2] > 40 * this.medianDepth) continue;
+      du = f * p[0] / p[2] + cx - x2; dv = f * p[1] / p[2] + cy - y2;
+      if (du * du + dv * dv > reproj * reproj) continue;
+      pts2[2 * m] = x2; pts2[2 * m + 1] = y2;
+      pts3[3 * m] = X[0]; pts3[3 * m + 1] = X[1]; pts3[3 * m + 2] = X[2];
+      m++;
+    }
+    if (m === 0) return null;
+    return { pts2: pts2.subarray(0, 2 * m), pts3: pts3.subarray(0, 3 * m), n: m };
+  }
+
+  // Build the textured mesh for keyframe KF (dense matches from prevKF plus tracked map points) and
+  // remember the current frame as the reference for the next keyframe.
+  meshKeyframe(KF, prevKF) {
+    if (!this.opts.meshing) { this.lastMeshKF = KF; return; }
+    const { f, cx, cy } = this.cam;
+    const dense = this.densify(KF, prevKF);
+    // Gather vertices: dense points + sparse map points observed in this keyframe.
+    const sparse = [];
+    for (const tr of this.tracks) {
+      const o = tr.obs[tr.obs.length - 1];
+      if (tr.mp && !tr.mp.bad && o.kf === KF) sparse.push(tr);
+    }
+    const n = (dense ? dense.n : 0) + sparse.length;
+    if (n >= 3) {
+      const pts2 = new Float64Array(2 * n), pts3 = new Float64Array(3 * n);
+      let k = 0;
+      if (dense) { pts2.set(dense.pts2); pts3.set(dense.pts3); k = dense.n; }
+      for (const tr of sparse) {
+        const o = tr.obs[tr.obs.length - 1];
+        pts2[2 * k] = o.x; pts2[2 * k + 1] = o.y;
+        pts3[3 * k] = tr.mp.X[0]; pts3[3 * k + 1] = tr.mp.X[1]; pts3[3 * k + 2] = tr.mp.X[2];
+        k++;
+      }
+      const mesh = buildKeyframeMesh(pts2, pts3, n, KF.pose, this.w, this.h, { maxEdge2D: 0.25 * Math.max(this.w, this.h) });
+      if (mesh) {
+        mesh.kfId = KF.id; mesh.width = this.w; mesh.height = this.h;
+        this.pendingMesh = mesh;
+        this.meshStats.vertices += mesh.vertexCount; this.meshStats.triangles += mesh.triangleCount;
+      }
+      // Keep dense points for the point-cloud view.
+      if (dense) {
+        const rgba = this.curRgba;
+        for (let i = 0; i < dense.n; i++) {
+          const xi = Math.round(dense.pts2[2 * i]), yi = Math.round(dense.pts2[2 * i + 1]);
+          const c = 4 * (Math.min(Math.max(yi, 0), this.h - 1) * this.w + Math.min(Math.max(xi, 0), this.w - 1));
+          this.densePoints.push({ X: dense.pts3.slice(3 * i, 3 * i + 3), r: rgba ? rgba[c] : 200, g: rgba ? rgba[c + 1] : 200, b: rgba ? rgba[c + 2] : 200 });
+        }
+        if (this.densePoints.length > this.opts.maxDenseTotal) this.densePoints.splice(0, this.densePoints.length - this.opts.maxDenseTotal);
+        this.denseCount = this.densePoints.length;
+      }
+    }
+    this.snapshotKeyframePyramid();
+    this.lastMeshKF = KF;
   }
 
   // ---------- Relocalization ----------
@@ -601,17 +734,21 @@ export class Slam {
         procMs,
         parallax: this.lastParallax,
         medianDepth: this.medianDepth,
+        densePoints: this.denseCount,
+        meshTriangles: this.meshStats.triangles,
       },
       mapChanged,
     };
     if (mapChanged) result.map = this.buildMapSnapshot();
+    if (this.pendingMesh) { result.mesh = this.pendingMesh; this.pendingMesh = null; }
     return result;
   }
 
   buildMapSnapshot() {
     let count = 0;
     for (const mp of this.mapPoints) if (!mp.bad) count++;
-    const positions = new Float32Array(3 * count), colors = new Uint8Array(3 * count);
+    const total = count + this.densePoints.length;
+    const positions = new Float32Array(3 * total), colors = new Uint8Array(3 * total);
     let k = 0;
     for (const mp of this.mapPoints) {
       if (mp.bad) continue;
@@ -619,6 +756,12 @@ export class Slam {
       colors[3 * k] = mp.r; colors[3 * k + 1] = mp.g; colors[3 * k + 2] = mp.b;
       k++;
     }
+    for (const d of this.densePoints) {
+      positions[3 * k] = d.X[0]; positions[3 * k + 1] = d.X[1]; positions[3 * k + 2] = d.X[2];
+      colors[3 * k] = d.r; colors[3 * k + 1] = d.g; colors[3 * k + 2] = d.b;
+      k++;
+    }
+    count = total;
     const kfs = new Float32Array(12 * this.keyframes.length);
     this.keyframes.forEach((kf, i) => { kfs.set(kf.pose.R, 12 * i); kfs.set(kf.pose.t, 12 * i + 9); });
     return { positions, colors, count, keyframes: kfs, keyframeCount: this.keyframes.length, version: this.mapVersion };
@@ -627,7 +770,7 @@ export class Slam {
   // PLY export of the current map (ASCII).
   exportPly() {
     const lines = [];
-    let count = 0;
+    let count = this.densePoints.length;
     for (const mp of this.mapPoints) if (!mp.bad) count++;
     lines.push('ply', 'format ascii 1.0', `element vertex ${count}`,
       'property float x', 'property float y', 'property float z',
@@ -636,6 +779,7 @@ export class Slam {
       if (mp.bad) continue;
       lines.push(`${mp.X[0].toFixed(4)} ${mp.X[1].toFixed(4)} ${mp.X[2].toFixed(4)} ${mp.r} ${mp.g} ${mp.b}`);
     }
+    for (const d of this.densePoints) lines.push(`${d.X[0].toFixed(4)} ${d.X[1].toFixed(4)} ${d.X[2].toFixed(4)} ${d.r} ${d.g} ${d.b}`);
     return lines.join('\n') + '\n';
   }
 }

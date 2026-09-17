@@ -1,6 +1,7 @@
 // Three.js viewer for the point-cloud map, camera trajectory and keyframe frustums.
 import * as THREE from 'three';
 import { OrbitControls } from '../lib/OrbitControls.js';
+import { GLTFExporter } from '../lib/exporters/GLTFExporter.js';
 
 function makeDiscTexture() {
   const c = document.createElement('canvas');
@@ -51,6 +52,14 @@ export class MapViewer {
     this.points.frustumCulled = false;
     this.root.add(this.points);
     this._ensureCapacity(20000);
+
+    // Textured keyframe meshes
+    this.meshGroup = new THREE.Group();
+    this.root.add(this.meshGroup);
+    this.meshes = [];
+    this.maxMeshes = 120;
+    this.meshCounter = 0;
+    this.meshTriangles = 0;
 
     // Trajectory
     this.trajCapacity = 30000;
@@ -201,6 +210,80 @@ export class MapViewer {
     }
   }
 
+  /**
+   * Add a textured mesh for a keyframe.
+   * @param {{positions:Float32Array, uvs:Float32Array, indices:Uint32Array, kfId:number}} mesh
+   * @param {HTMLCanvasElement|{rgba:Uint8ClampedArray,width:number,height:number}} tex texture source
+   */
+  addKeyframeMesh(mesh, tex) {
+    const geom = new THREE.BufferGeometry();
+    geom.setAttribute('position', new THREE.BufferAttribute(mesh.positions, 3));
+    geom.setAttribute('uv', new THREE.BufferAttribute(mesh.uvs, 2));
+    geom.setIndex(new THREE.BufferAttribute(mesh.indices, 1));
+    geom.computeBoundingSphere();
+    let texture;
+    if (typeof HTMLCanvasElement !== 'undefined' && tex instanceof HTMLCanvasElement) {
+      texture = new THREE.CanvasTexture(tex);
+    } else {
+      texture = new THREE.DataTexture(new Uint8Array(tex.rgba.buffer, tex.rgba.byteOffset, tex.rgba.length), tex.width, tex.height, THREE.RGBAFormat, THREE.UnsignedByteType);
+    }
+    texture.flipY = false; // uv.v = y / height (image row 0 at v = 0)
+    texture.colorSpace = THREE.SRGBColorSpace;
+    texture.minFilter = THREE.LinearMipmapLinearFilter;
+    texture.magFilter = THREE.LinearFilter;
+    texture.generateMipmaps = true;
+    texture.needsUpdate = true;
+    const material = new THREE.MeshBasicMaterial({
+      map: texture, side: THREE.DoubleSide,
+      polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -(this.meshCounter % 1000),
+    });
+    const m = new THREE.Mesh(geom, material);
+    m.userData.kfId = mesh.kfId;
+    m.userData.triangles = mesh.indices.length / 3;
+    this.meshGroup.add(m);
+    this.meshes.push(m);
+    this.meshCounter++;
+    this.meshTriangles += m.userData.triangles;
+    while (this.meshes.length > this.maxMeshes) this._disposeMesh(this.meshes.shift());
+  }
+
+  _disposeMesh(m) {
+    this.meshGroup.remove(m);
+    this.meshTriangles -= m.userData.triangles || 0;
+    m.geometry.dispose();
+    if (m.material.map) m.material.map.dispose();
+    m.material.dispose();
+  }
+
+  setMaxMeshes(n) {
+    this.maxMeshes = n;
+    while (this.meshes.length > this.maxMeshes) this._disposeMesh(this.meshes.shift());
+  }
+
+  // 'mesh' shows textured keyframe meshes, 'points' the point cloud, 'both' shows both.
+  setViewMode(mode) {
+    this.viewMode = mode;
+    this.meshGroup.visible = mode === 'mesh' || mode === 'both';
+    this.points.visible = mode === 'points' || mode === 'both';
+  }
+
+  // Export the textured meshes as a binary glTF (GLB). Resolves with an ArrayBuffer.
+  exportGLB() {
+    return new Promise((resolve, reject) => {
+      if (this.meshes.length === 0) { reject(new Error('no meshes')); return; }
+      const hidden = [this.points, this.traj, this.kfLines, this.camFrustum];
+      const prev = hidden.map((o) => o.visible);
+      hidden.forEach((o) => { o.visible = false; });
+      const axes = this.root.children.filter((c) => c instanceof THREE.AxesHelper);
+      axes.forEach((a) => { a.visible = false; });
+      const meshVisible = this.meshGroup.visible;
+      this.meshGroup.visible = true;
+      const restore = () => { hidden.forEach((o, i) => { o.visible = prev[i]; }); axes.forEach((a) => { a.visible = true; }); this.meshGroup.visible = meshVisible; };
+      const exporter = new GLTFExporter();
+      exporter.parse(this.root, (result) => { restore(); resolve(result); }, (err) => { restore(); reject(err); }, { binary: true, onlyVisible: true });
+    });
+  }
+
   setFollow(on) {
     this.follow = on;
     this.lastCamPos = null;
@@ -213,6 +296,8 @@ export class MapViewer {
 
   clear() {
     this.userInteracted = false;
+    while (this.meshes.length) this._disposeMesh(this.meshes.shift());
+    this.meshTriangles = 0;
     this.pointCount = 0;
     this.pointsGeom.setDrawRange(0, 0);
     this.trajCount = 0;
@@ -224,6 +309,19 @@ export class MapViewer {
 
   // Fit the view to the current point cloud (or the origin if empty).
   fitView() {
+    if (this.pointCount < 10 && this.meshes.length > 0) {
+      const box = new THREE.Box3();
+      for (const m of this.meshes) box.expandByObject(m);
+      if (!box.isEmpty()) {
+        const center = box.getCenter(new THREE.Vector3());
+        const size = Math.max(box.getSize(new THREE.Vector3()).length() * 0.6, 0.5);
+        const dist = (size / 2) / Math.tan((this.camera.fov * Math.PI / 180) / 2) * 1.3;
+        this.controls.target.copy(center);
+        this.camera.position.copy(center).add(new THREE.Vector3(0.6, 0.7, 0.9).normalize().multiplyScalar(dist));
+        this.lastCamPos = null;
+        return;
+      }
+    }
     if (this.pointCount < 10) {
       this.controls.target.set(0, 0, -2);
       this.camera.position.set(0.8, 1.2, 1.6);

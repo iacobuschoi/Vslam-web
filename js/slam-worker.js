@@ -34,6 +34,11 @@ self.onmessage = (e) => {
       const transfer = [res.features.buffer];
       if (res.pose) transfer.push(res.pose.buffer);
       if (res.map) transfer.push(res.map.positions.buffer, res.map.colors.buffer, res.map.keyframes.buffer);
+      if (res.mesh) {
+        // Hand the frame back as the mesh texture (zero-copy).
+        res.mesh.rgba = rgba;
+        transfer.push(res.mesh.positions.buffer, res.mesh.uvs.buffer, res.mesh.indices.buffer, rgba.buffer);
+      }
       post({ type: 'result', ...res, time: msg.time }, transfer);
       break;
     }
@@ -49,6 +54,7 @@ self.onmessage = (e) => {
       if (msg.options && msg.options.fovDeg !== undefined) slam.setFov(msg.options.fovDeg);
       if (msg.options && msg.options.fbCheck !== undefined) slam.klt.fbCheck = !!msg.options.fbCheck;
       if (msg.options && msg.options.relocalize !== undefined) slam.opts.relocalize = !!msg.options.relocalize;
+      if (msg.options && msg.options.meshing !== undefined) slam.opts.meshing = !!msg.options.meshing;
       if (msg.reset) { slam.reset(); post({ type: 'reset' }); }
       break;
     }

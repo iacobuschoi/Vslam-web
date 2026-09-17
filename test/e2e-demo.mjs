@@ -34,7 +34,8 @@ try {
   const errors = [];
   page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
   page.on('console', (m) => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
-  await page.goto(`http://localhost:${port}/?demo=1`, { waitUntil: 'load' });
+  // Track in point view (software GL renders textured meshes slowly); switch to the mesh view at the end.
+  await page.goto(`http://localhost:${port}/?demo=1&view=points`, { waitUntil: 'load' });
   const t0 = Date.now();
   let last = null;
   while (Date.now() - t0 < durationSec * 1000) {
@@ -59,6 +60,23 @@ try {
   });
   console.log('overlay painted pixels:', overlayPixels);
   if (overlayPixels < 100) errors.push('feature overlay is empty');
+  // Textured meshes + GLB export.
+  await page.evaluate(() => window.__vslam.setViewMode('mesh'));
+  await page.waitForTimeout(1500);
+  const meshInfo = await page.evaluate(async () => {
+    const a = window.__vslam;
+    const info = { meshes: a.viewer.meshes.length, triangles: a.viewer.meshTriangles, viewMode: a.settings.viewMode };
+    try {
+      const buf = await a.exportGlb();
+      const magic = new TextDecoder().decode(new Uint8Array(buf, 0, 4));
+      info.glbBytes = buf.byteLength; info.glbMagic = magic;
+    } catch (e) { info.glbError = String(e); }
+    return info;
+  });
+  console.log('mesh info:', JSON.stringify(meshInfo));
+  if (!(meshInfo.meshes >= 3 && meshInfo.triangles > 1000)) errors.push('too few textured meshes');
+  if (meshInfo.glbMagic !== 'glTF' || !(meshInfo.glbBytes > 100000)) errors.push('GLB export failed: ' + JSON.stringify(meshInfo));
+  await page.screenshot({ path: path.join(outDir, 'demo-mesh.png') });
   if (errors.length) console.log('browser errors:\n' + errors.join('\n'));
   const ok = last && last.state === 'TRACKING' && last.stats.mapPoints > 300 && last.stats.keyframes >= 3;
   console.log(ok ? 'E2E OK' : 'E2E FAILED');
