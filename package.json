@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node server.js",
     "test": "node --test test/*.test.mjs",
-    "test:e2e": "node test/e2e-demo.mjs"
+    "test:e2e": "node test/e2e-demo.mjs",
+    "test:e2e:camera": "node test/e2e-camera.mjs"
   },
   "license": "MIT",
   "private": true

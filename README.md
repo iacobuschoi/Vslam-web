@@ -93,11 +93,12 @@ test/               Node 단위·통합 테스트, Playwright E2E
 ## 테스트
 
 ```bash
-npm test          # 선형대수·기하·추적·합성 방 통합 테스트 (Node 18+)
-npm run test:e2e  # 헤드리스 Chromium에서 데모 모드 실행 (Playwright 필요)
+npm test                 # 선형대수·기하·추적·합성 방 통합 테스트 (Node 18+)
+npm run test:e2e         # 헤드리스 Chromium에서 데모 모드 실행 (Playwright 필요)
+npm run test:e2e:camera  # 합성 방 영상을 가짜 카메라로 주입해 실제 카메라 경로(getUserMedia) 검증
 ```
 
-통합 테스트는 CPU 레이캐스팅으로 렌더링한 가상의 방에서 파이프라인을 돌려, 정답 궤적과의 오차(유사변환 정렬 후 RMSE)와 맵 포인트의 벽면 밀착도를 검증합니다.
+통합 테스트는 CPU 레이캐스팅으로 렌더링한 가상의 방에서 파이프라인을 돌려, 정답 궤적과의 오차(유사변환 정렬 후 RMSE)와 맵 포인트의 벽면 밀착도를 검증합니다. 카메라 E2E는 `test/make-y4m.mjs`가 만든 Y4M 영상을 Chromium의 `--use-file-for-fake-video-capture`로 재생합니다.
 
 ## 브라우저 지원
 
